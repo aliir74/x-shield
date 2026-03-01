@@ -13,6 +13,7 @@ from src.shield import (
     load_state,
     main,
     notify,
+    parse_args,
     prune_history,
     save_state,
     set_protected,
@@ -223,7 +224,7 @@ class TestMain:
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
             mock_get.return_value = {"followers": 1005, "notifications": 2}
-            await main()
+            await main([])
 
         mock_notify.assert_not_awaited()
         state = json.loads(self.state_path.read_text())
@@ -251,7 +252,7 @@ class TestMain:
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
             mock_get.return_value = {"followers": 1200, "notifications": 10}
-            await main()
+            await main([])
 
         mock_protect.assert_awaited_once()
         mock_notify.assert_awaited_once()
@@ -279,7 +280,7 @@ class TestMain:
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
             mock_get.return_value = {"followers": 1200, "notifications": 10}
-            await main()
+            await main([])
 
         mock_protect.assert_not_awaited()
         mock_notify.assert_not_awaited()
@@ -292,7 +293,7 @@ class TestMain:
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
             mock_get.side_effect = Exception("connection error")
-            await main()
+            await main([])
 
         mock_notify.assert_awaited_once()
         call_args = mock_notify.call_args
@@ -303,7 +304,7 @@ class TestMain:
         monkeypatch.delenv("CT0", raising=False)
         monkeypatch.delenv("AUTH_TOKEN", raising=False)
         with pytest.raises(SystemExit, match="1"):
-            await main()
+            await main([])
 
     async def test_main_set_protected_failure(self, mock_client):
         """set_protected failure: state not updated to protected."""
@@ -326,9 +327,63 @@ class TestMain:
         ):
             mock_get.return_value = {"followers": 1200, "notifications": 10}
             mock_protect.side_effect = Exception("API error")
-            await main()
+            await main([])
 
         # Notification still sent despite protect failure
         mock_notify.assert_awaited_once()
         state = json.loads(self.state_path.read_text())
         assert state["is_protected"] is False
+
+
+class TestParseArgs:
+    def test_default_no_test(self):
+        """Default args: --test is False."""
+        args = parse_args([])
+        assert args.test is False
+
+    def test_test_flag(self):
+        """--test flag sets test to True."""
+        args = parse_args(["--test"])
+        assert args.test is True
+
+
+class TestTestMode:
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path, env_vars):
+        """Patch STATE_FILE to use temp directory."""
+        self.state_path = tmp_path / "state.json"
+        self._state_patch = patch("src.shield.STATE_FILE", self.state_path)
+        self._state_patch.start()
+        yield
+        self._state_patch.stop()
+
+    async def test_test_mode_calls_protect_and_notify(self, mock_client):
+        """--test triggers set_protected and notify, then exits without spike detection."""
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+        ):
+            await main(["--test"])
+
+        mock_protect.assert_awaited_once_with(mock_client)
+        mock_notify.assert_awaited_once()
+        assert "Test" in mock_notify.call_args.kwargs.get("title", mock_notify.call_args.args[1])
+        # Spike detection should NOT run
+        mock_get.assert_not_awaited()
+        # State file should NOT be created
+        assert not self.state_path.exists()
+
+    async def test_test_mode_no_ntfy_topic(self, mock_client, monkeypatch):
+        """--test without NTFY_TOPIC: protect runs, notify skipped."""
+        monkeypatch.delenv("NTFY_TOPIC", raising=False)
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            await main(["--test"])
+
+        mock_protect.assert_awaited_once()
+        mock_notify.assert_not_awaited()

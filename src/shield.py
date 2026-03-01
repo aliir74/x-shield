@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -124,8 +125,20 @@ async def notify(topic: str, message: str, title: str = "X Shield Alert") -> Non
         )
 
 
-async def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(description="X Shield: auto-private on viral detection")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="test mode: trigger protect + notify immediately, then exit",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> None:
     """Main loop: fetch metrics, detect spikes, protect if needed."""
+    args = parse_args(argv)
     load_dotenv()
 
     ct0 = os.environ.get("CT0")
@@ -138,6 +151,17 @@ async def main() -> None:
 
     client = Client()
     client.set_cookies({"ct0": ct0, "auth_token": auth_token})
+
+    if args.test:
+        log.info("test mode: triggering protect + notify")
+        await set_protected(client)
+        log.info("account set to protected mode")
+        if ntfy_topic:
+            await notify(ntfy_topic, "Test: protect + notify triggered manually.", title="X Shield Test")
+            log.info("test notification sent to %s", ntfy_topic)
+        else:
+            log.warning("NTFY_TOPIC not set, skipping notification")
+        return
 
     state = load_state(STATE_FILE)
 
