@@ -10,3 +10,4 @@ build/
 .pyright/
 .ruff_cache/
 .context/
+cron.log
