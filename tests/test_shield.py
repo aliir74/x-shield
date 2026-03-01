@@ -2,13 +2,20 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.shield import (
     SpikeReason,
     detect_spike,
+    get_metrics,
     load_state,
+    main,
+    notify,
     prune_history,
     save_state,
+    set_protected,
 )
 
 
@@ -148,3 +155,180 @@ class TestPruneHistory:
         """Empty history returns empty list."""
         result = prune_history([])
         assert result == []
+
+
+class TestGetMetrics:
+    async def test_get_metrics_success(self, mock_client):
+        """Returns follower count and notification count."""
+        result = await get_metrics(mock_client)
+        assert result == {"followers": 1500, "notifications": 3}
+        mock_client.user.assert_awaited_once()
+        mock_client.get_notifications.assert_awaited_once_with("All", count=40)
+
+    async def test_get_metrics_notification_failure(self, mock_client):
+        """Falls back to 0 notifications when fetch fails."""
+        mock_client.get_notifications = AsyncMock(side_effect=Exception("API error"))
+        result = await get_metrics(mock_client)
+        assert result == {"followers": 1500, "notifications": 0}
+
+
+class TestSetProtected:
+    async def test_set_protected_calls_api(self, mock_client):
+        """Calls Twitter v1.1 API with correct URL and data."""
+        await set_protected(mock_client)
+        mock_client.post.assert_awaited_once_with(
+            "https://api.x.com/1.1/account/settings.json",
+            data={"protected": "true"},
+            headers={
+                "Authorization": "Bearer test",
+                "content-type": "application/x-www-form-urlencoded",
+            },
+        )
+
+
+class TestNotify:
+    async def test_notify_sends_request(self):
+        """Sends POST to ntfy.sh with correct headers."""
+        mock_post = AsyncMock()
+        mock_http = MagicMock()
+        mock_http.post = mock_post
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.shield.httpx.AsyncClient", return_value=mock_http):
+            await notify("test_topic", "test message", title="Test Title")
+
+        mock_post.assert_awaited_once_with(
+            "https://ntfy.sh/test_topic",
+            content="test message",
+            headers={"Title": "Test Title", "Priority": "high", "Tags": "shield"},
+        )
+
+
+class TestMain:
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path, env_vars):
+        """Patch STATE_FILE to use temp directory."""
+        self.state_path = tmp_path / "state.json"
+        self._state_patch = patch("src.shield.STATE_FILE", self.state_path)
+        self._state_patch.start()
+        yield
+        self._state_patch.stop()
+
+    async def test_main_no_spike(self, mock_client):
+        """Normal run: no spike, state saved."""
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_get.return_value = {"followers": 1005, "notifications": 2}
+            await main()
+
+        mock_notify.assert_not_awaited()
+        state = json.loads(self.state_path.read_text())
+        assert len(state["history"]) == 1
+        assert state["history"][0]["followers"] == 1005
+
+    async def test_main_spike_sets_protected(self, mock_client):
+        """Spike detected: account set to protected, notification sent."""
+        # Seed state with history that will trigger a spike
+        initial_state = {
+            "history": [
+                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
+                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+            ],
+            "is_protected": False,
+            "last_spike_at": None,
+        }
+        self.state_path.write_text(json.dumps(initial_state))
+
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            await main()
+
+        mock_protect.assert_awaited_once()
+        mock_notify.assert_awaited_once()
+        state = json.loads(self.state_path.read_text())
+        assert state["is_protected"] is True
+        assert state["last_spike_at"] is not None
+
+    async def test_main_spike_already_protected(self, mock_client):
+        """Spike detected but already protected: no action taken."""
+        initial_state = {
+            "history": [
+                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
+                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+            ],
+            "is_protected": True,
+            "last_spike_at": "2026-03-01T09:00:00+00:00",
+        }
+        self.state_path.write_text(json.dumps(initial_state))
+
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            await main()
+
+        mock_protect.assert_not_awaited()
+        mock_notify.assert_not_awaited()
+
+    async def test_main_metrics_failure_notifies(self, mock_client):
+        """Metrics fetch failure sends error notification."""
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_get.side_effect = Exception("connection error")
+            await main()
+
+        mock_notify.assert_awaited_once()
+        call_args = mock_notify.call_args
+        assert "Error" in call_args.args[1]
+
+    async def test_main_missing_env_exits(self, monkeypatch):
+        """Missing CT0/AUTH_TOKEN causes sys.exit(1)."""
+        monkeypatch.delenv("CT0", raising=False)
+        monkeypatch.delenv("AUTH_TOKEN", raising=False)
+        with pytest.raises(SystemExit, match="1"):
+            await main()
+
+    async def test_main_set_protected_failure(self, mock_client):
+        """set_protected failure: state not updated to protected."""
+        initial_state = {
+            "history": [
+                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
+                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+            ],
+            "is_protected": False,
+            "last_spike_at": None,
+        }
+        self.state_path.write_text(json.dumps(initial_state))
+
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            mock_protect.side_effect = Exception("API error")
+            await main()
+
+        # Notification still sent despite protect failure
+        mock_notify.assert_awaited_once()
+        state = json.loads(self.state_path.read_text())
+        assert state["is_protected"] is False

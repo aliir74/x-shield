@@ -1,5 +1,7 @@
 """Shared test fixtures."""
 
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
+
 import pytest
 
 from src.shield import SpikeReason  # noqa: F401
@@ -24,3 +26,24 @@ def state_with_history():
         "is_protected": False,
         "last_spike_at": None,
     }
+
+
+@pytest.fixture()
+def mock_client():
+    """Return a mock twikit Client with AsyncMock methods."""
+    client = MagicMock()
+    user = MagicMock()
+    user.followers_count = 1500
+    client.user = AsyncMock(return_value=user)
+    client.get_notifications = AsyncMock(return_value=[MagicMock(), MagicMock(), MagicMock()])
+    client.post = AsyncMock(return_value=(None, MagicMock(status_code=200)))
+    type(client)._base_headers = PropertyMock(return_value={"Authorization": "Bearer test"})
+    return client
+
+
+@pytest.fixture()
+def env_vars(monkeypatch):
+    """Set required environment variables for main()."""
+    monkeypatch.setenv("CT0", "test_ct0")
+    monkeypatch.setenv("AUTH_TOKEN", "test_auth_token")
+    monkeypatch.setenv("NTFY_TOPIC", "test_topic")
