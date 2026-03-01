@@ -1,6 +1,6 @@
 """Shared test fixtures."""
 
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -43,7 +43,9 @@ def mock_client():
 
 @pytest.fixture()
 def env_vars(monkeypatch):
-    """Set required environment variables for main()."""
+    """Set required environment variables for main() and prevent .env override."""
     monkeypatch.setenv("CT0", "test_ct0")
     monkeypatch.setenv("AUTH_TOKEN", "test_auth_token")
     monkeypatch.setenv("NTFY_TOPIC", "test_topic")
+    with patch("src.shield.load_dotenv"):
+        yield
