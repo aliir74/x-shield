@@ -4,7 +4,7 @@ Auto-private your Twitter/X account when viral activity is detected. Monitors fo
 
 ## How it works
 
-Runs on a cron schedule (every 5 minutes). Each run:
+Runs on a schedule via macOS launchd (every 15 minutes). Each run:
 
 1. Fetches current follower count and notifications via twikit
 2. Compares against a rolling 24-hour baseline
@@ -55,19 +55,33 @@ uv run python -m src.shield
 
 This will fetch your current metrics and write the initial `state.json`. No spike detection on first two runs (needs baseline data).
 
-### 6. Set up cron
+### 6. Set up launchd (macOS)
+
+Copy the provided plist to your LaunchAgents directory:
 
 ```bash
-crontab -e
+cp com.aliir74.x-shield.plist ~/Library/LaunchAgents/
 ```
 
-Add:
+Edit the plist to update paths if needed, then load it:
 
-```
-*/5 * * * * cd /path/to/x-shield && /path/to/.venv/bin/python -m src.shield >> /tmp/x-shield.log 2>&1
+```bash
+launchctl load ~/Library/LaunchAgents/com.aliir74.x-shield.plist
 ```
 
-Replace `/path/to/x-shield` with the actual path to this project.
+Verify it's running:
+
+```bash
+launchctl list | grep x-shield
+```
+
+To stop:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.aliir74.x-shield.plist
+```
+
+Logs are written to `cron.log` in the project directory.
 
 ## Manual operations
 
@@ -81,7 +95,11 @@ X Shield does not auto-revert to public. To go public again:
 
 ### Force trigger (for testing)
 
-Temporarily set `STATIC_FLOOR = 0` in `src/shield.py`, run the script, then revert.
+```bash
+uv run python -m src.shield --test
+```
+
+This triggers protect + notify immediately without needing spike data.
 
 ## Running tests
 

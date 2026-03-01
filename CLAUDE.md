@@ -5,9 +5,10 @@ Auto-private Twitter/X account on viral detection using twikit.
 ## Project structure
 
 ```
-src/shield.py    — Main script: spike detection, auto-private, notifications
-tests/           — Unit tests for pure logic (no API mocking)
-state.json       — Runtime state (gitignored, auto-created)
+src/shield.py                   — Main script: spike detection, auto-private, notifications
+tests/                          — Unit tests for pure logic (no API mocking)
+state.json                      — Runtime state (gitignored, auto-created)
+com.aliir74.x-shield.plist      — macOS launchd plist for scheduling
 ```
 
 ## Commands
@@ -41,6 +42,19 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs 3 jobs on PRs to main:
 - **Test** — pytest with coverage
 
 Branch protection requires all 3 to pass before merge.
+
+## Scheduling
+
+Runs via macOS launchd (not cron). Plist file: `com.aliir74.x-shield.plist`
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.aliir74.x-shield.plist    # start
+launchctl unload ~/Library/LaunchAgents/com.aliir74.x-shield.plist  # stop
+launchctl list | grep x-shield                                       # check status
+```
+
+- Runs every 15 minutes (900s interval)
+- Logs to `cron.log` in project root (gitignored)
 
 ## Key technical details
 
