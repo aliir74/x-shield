@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.shield import (
-    SpikeReason,
+    SpikeResult,
+    SpikeType,
+    _check_signal,
     detect_spike,
     get_metrics,
     load_state,
@@ -20,49 +22,102 @@ from src.shield import (
 )
 
 
+class TestCheckSignal:
+    def test_adaptive(self):
+        """Signal at 3x+ rolling average triggers adaptive detection."""
+        history = [
+            {"followers": 1000},
+            {"followers": 1010},
+            {"followers": 1020},
+            {"followers": 1030},
+        ]
+        # avg_delta = 10, current_delta = 35 → 3.5x → adaptive
+        result = _check_signal(1065, history, "followers", 100)
+        assert result == SpikeType.ADAPTIVE
+
+    def test_static_floor(self):
+        """Signal at static floor triggers static floor detection."""
+        history = [
+            {"followers": 1000},
+            {"followers": 1050},
+            {"followers": 1100},
+        ]
+        # avg_delta = 50, current_delta = 100. 100 > 50*3=150? No. 100 >= 100 → static.
+        result = _check_signal(1200, history, "followers", 100)
+        assert result == SpikeType.STATIC_FLOOR
+
+    def test_both(self):
+        """Signal triggers both adaptive and static floor."""
+        history = [
+            {"followers": 1000},
+            {"followers": 1010},
+            {"followers": 1020},
+            {"followers": 1030},
+        ]
+        # avg_delta = 10, current_delta = 150. 150 > 30 → adaptive. 150 >= 100 → static.
+        result = _check_signal(1180, history, "followers", 100)
+        assert result == SpikeType.BOTH
+
+    def test_no_spike(self):
+        """Normal growth does not trigger."""
+        history = [
+            {"followers": 1000},
+            {"followers": 1010},
+            {"followers": 1020},
+            {"followers": 1030},
+        ]
+        result = _check_signal(1035, history, "followers", 100)
+        assert result is None
+
+    def test_missing_key_defaults_to_zero(self):
+        """History entries missing the key default to 0."""
+        history = [
+            {"followers": 1000},
+            {"followers": 1010},
+        ]
+        # engagement missing from history, defaults to 0. current=60, delta=60, avg=0.
+        # avg_delta=0 → adaptive skipped. 60 >= 50 → static floor.
+        result = _check_signal(60, history, "engagement", 50)
+        assert result == SpikeType.STATIC_FLOOR
+
+
 class TestDetectSpike:
-    def test_adaptive_spike(self, state_with_history):
-        """Spike at 3x+ rolling average triggers adaptive detection."""
-        # Average delta is 10. Current delta of 35 is 3.5x → spike.
-        current = {"followers": 1065, "notifications": 10}
+    def test_follower_spike_only(self, state_with_history):
+        """Follower spike triggers with no engagement spike."""
+        # avg follower delta = 10, current_delta = 35 → adaptive
+        # avg engagement delta = 5, current_delta = 10 → 2x (not 3x)
+        current = {"followers": 1065, "notifications": 10, "engagement": 45}
         result = detect_spike(current, state_with_history)
-        assert result == SpikeReason.ADAPTIVE
+        assert result is not None
+        assert result.followers == SpikeType.ADAPTIVE
+        assert result.engagement is None
 
-    def test_static_floor_spike(self, state_with_history):
-        """Spike at 100+ followers triggers static floor detection."""
-        # Make avg_delta high enough that adaptive doesn't trigger,
-        # but current delta >= 100.
-        state = {
-            "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1050, "notifications": 8},
-                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1100, "notifications": 6},
-            ],
-            "is_protected": False,
-            "last_spike_at": None,
-        }
-        # avg_delta = 50, current_delta = 100. 100 > 50*3=150? No. But 100 >= 100 static floor.
-        current = {"followers": 1200, "notifications": 10}
-        result = detect_spike(current, state)
-        assert result == SpikeReason.STATIC_FLOOR
-
-    def test_both_spike(self, state_with_history):
-        """Spike triggers both adaptive and static floor."""
-        # avg_delta = 10, current_delta = 150. 150 > 10*3=30 → adaptive. 150 >= 100 → static.
-        current = {"followers": 1180, "notifications": 10}
+    def test_engagement_spike_only(self, state_with_history):
+        """Engagement spike triggers with no follower spike."""
+        # avg engagement delta = 5, current_delta = 65 → 13x → adaptive + 65 >= 50 → static
+        current = {"followers": 1035, "notifications": 10, "engagement": 100}
         result = detect_spike(current, state_with_history)
-        assert result == SpikeReason.BOTH
+        assert result is not None
+        assert result.followers is None
+        assert result.engagement == SpikeType.BOTH
+
+    def test_both_signals_spike(self, state_with_history):
+        """Both follower and engagement spike together."""
+        current = {"followers": 1180, "notifications": 10, "engagement": 100}
+        result = detect_spike(current, state_with_history)
+        assert result is not None
+        assert result.followers == SpikeType.BOTH
+        assert result.engagement == SpikeType.BOTH
 
     def test_no_spike(self, state_with_history):
         """Normal growth does not trigger spike detection."""
-        # avg_delta = 10, current_delta = 5. Neither condition met.
-        current = {"followers": 1035, "notifications": 5}
+        current = {"followers": 1035, "notifications": 5, "engagement": 40}
         result = detect_spike(current, state_with_history)
         assert result is None
 
     def test_first_run_empty_history(self, default_state):
         """Empty history returns None (first run)."""
-        current = {"followers": 1000, "notifications": 0}
+        current = {"followers": 1000, "notifications": 0, "engagement": 50}
         result = detect_spike(current, default_state)
         assert result is None
 
@@ -70,16 +125,21 @@ class TestDetectSpike:
         """Single history entry returns None (not enough data)."""
         state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
             ],
         }
-        current = {"followers": 1500, "notifications": 10}
+        current = {"followers": 1500, "notifications": 10, "engagement": 200}
         result = detect_spike(current, state)
         assert result is None
 
     def test_negative_delta_no_spike(self, state_with_history):
         """Losing followers does not trigger spike."""
-        current = {"followers": 1020, "notifications": 5}
+        current = {"followers": 1020, "notifications": 5, "engagement": 30}
         result = detect_spike(current, state_with_history)
         assert result is None
 
@@ -87,15 +147,67 @@ class TestDetectSpike:
         """When average delta is 0, adaptive detection is skipped."""
         state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1000, "notifications": 5},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:05:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:10:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
             ],
         }
-        # avg_delta = 0, current_delta = 50. Adaptive requires avg > 0, so only static check.
-        current = {"followers": 1050, "notifications": 5}
+        # avg_delta = 0, current_delta = 30. 30 < 50 static floor → no engagement spike.
+        current = {"followers": 1050, "notifications": 5, "engagement": 50}
         result = detect_spike(current, state)
-        assert result is None  # 50 < 100 static floor
+        assert result is None
+
+    def test_backward_compat_missing_engagement(self):
+        """Old history entries without engagement key still work."""
+        state = {
+            "history": [
+                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
+                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+            ],
+        }
+        current = {"followers": 1065, "notifications": 10, "engagement": 0}
+        result = detect_spike(current, state)
+        assert result is not None
+        assert result.followers == SpikeType.ADAPTIVE
+
+
+class TestSpikeResult:
+    def test_is_spike_true(self):
+        """is_spike returns True when any signal fires."""
+        result = SpikeResult(engagement=SpikeType.ADAPTIVE)
+        assert result.is_spike is True
+
+    def test_is_spike_false(self):
+        """is_spike returns False when no signal fires."""
+        result = SpikeResult()
+        assert result.is_spike is False
+
+    def test_str_both_signals(self):
+        """String representation includes both signals."""
+        result = SpikeResult(followers=SpikeType.ADAPTIVE, engagement=SpikeType.STATIC_FLOOR)
+        assert "followers:adaptive" in str(result)
+        assert "engagement:static_floor" in str(result)
+
+    def test_str_single_signal(self):
+        """String representation with single signal."""
+        result = SpikeResult(engagement=SpikeType.BOTH)
+        assert str(result) == "engagement:both"
 
 
 class TestStateManagement:
@@ -109,7 +221,12 @@ class TestStateManagement:
         state_path = tmp_path / "state.json"
         state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
             ],
             "is_protected": True,
             "last_spike_at": "2026-03-01T10:00:00+00:00",
@@ -135,8 +252,8 @@ class TestPruneHistory:
         recent = (now - timedelta(hours=1)).isoformat()
 
         history = [
-            {"timestamp": old, "followers": 1000, "notifications": 5},
-            {"timestamp": recent, "followers": 1010, "notifications": 6},
+            {"timestamp": old, "followers": 1000, "notifications": 5, "engagement": 20},
+            {"timestamp": recent, "followers": 1010, "notifications": 6, "engagement": 25},
         ]
         result = prune_history(history)
         assert len(result) == 1
@@ -146,7 +263,12 @@ class TestPruneHistory:
         """All recent entries are preserved."""
         now = datetime.now(UTC)
         entries = [
-            {"timestamp": (now - timedelta(hours=i)).isoformat(), "followers": 1000 + i, "notifications": 5}
+            {
+                "timestamp": (now - timedelta(hours=i)).isoformat(),
+                "followers": 1000 + i,
+                "notifications": 5,
+                "engagement": 20,
+            }
             for i in range(5)
         ]
         result = prune_history(entries)
@@ -160,17 +282,29 @@ class TestPruneHistory:
 
 class TestGetMetrics:
     async def test_get_metrics_success(self, mock_client):
-        """Returns follower count and notification count."""
+        """Returns follower count, notification count, and engagement."""
         result = await get_metrics(mock_client, "testuser")
-        assert result == {"followers": 1500, "notifications": 3}
+        # 3 mock tweets, each with reply_count=5 + quote_count=3 = 8, total = 24
+        assert result == {"followers": 1500, "notifications": 3, "engagement": 24}
         mock_client.get_user_by_screen_name.assert_awaited_once_with("testuser")
         mock_client.get_notifications.assert_awaited_once_with("All", count=40)
+        mock_client.get_user_tweets.assert_awaited_once_with("12345", "Tweets", count=20)
 
     async def test_get_metrics_notification_failure(self, mock_client):
         """Falls back to 0 notifications when fetch fails."""
         mock_client.get_notifications = AsyncMock(side_effect=Exception("API error"))
         result = await get_metrics(mock_client, "testuser")
-        assert result == {"followers": 1500, "notifications": 0}
+        assert result["followers"] == 1500
+        assert result["notifications"] == 0
+        assert result["engagement"] == 24
+
+    async def test_get_metrics_tweet_fetch_failure(self, mock_client):
+        """Falls back to 0 engagement when tweet fetch fails."""
+        mock_client.get_user_tweets = AsyncMock(side_effect=Exception("API error"))
+        result = await get_metrics(mock_client, "testuser")
+        assert result["followers"] == 1500
+        assert result["notifications"] == 3
+        assert result["engagement"] == 0
 
 
 class TestSetProtected:
@@ -223,22 +357,37 @@ class TestMain:
             patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
-            mock_get.return_value = {"followers": 1005, "notifications": 2}
+            mock_get.return_value = {"followers": 1005, "notifications": 2, "engagement": 20}
             await main([])
 
         mock_notify.assert_not_awaited()
         state = json.loads(self.state_path.read_text())
         assert len(state["history"]) == 1
         assert state["history"][0]["followers"] == 1005
+        assert state["history"][0]["engagement"] == 20
 
     async def test_main_spike_sets_protected(self, mock_client):
         """Spike detected: account set to protected, notification sent."""
-        # Seed state with history that will trigger a spike
         initial_state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
-                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:05:00+00:00",
+                    "followers": 1010,
+                    "notifications": 8,
+                    "engagement": 25,
+                },
+                {
+                    "timestamp": "2026-03-01T10:10:00+00:00",
+                    "followers": 1020,
+                    "notifications": 6,
+                    "engagement": 30,
+                },
             ],
             "is_protected": False,
             "last_spike_at": None,
@@ -251,7 +400,7 @@ class TestMain:
             patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
-            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            mock_get.return_value = {"followers": 1200, "notifications": 10, "engagement": 100}
             await main([])
 
         mock_protect.assert_awaited_once()
@@ -264,9 +413,24 @@ class TestMain:
         """Spike detected but already protected: no action taken."""
         initial_state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
-                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:05:00+00:00",
+                    "followers": 1010,
+                    "notifications": 8,
+                    "engagement": 25,
+                },
+                {
+                    "timestamp": "2026-03-01T10:10:00+00:00",
+                    "followers": 1020,
+                    "notifications": 6,
+                    "engagement": 30,
+                },
             ],
             "is_protected": True,
             "last_spike_at": "2026-03-01T09:00:00+00:00",
@@ -279,7 +443,7 @@ class TestMain:
             patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
-            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            mock_get.return_value = {"followers": 1200, "notifications": 10, "engagement": 100}
             await main([])
 
         mock_protect.assert_not_awaited()
@@ -310,9 +474,24 @@ class TestMain:
         """set_protected failure: state not updated to protected."""
         initial_state = {
             "history": [
-                {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-                {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
-                {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:05:00+00:00",
+                    "followers": 1010,
+                    "notifications": 8,
+                    "engagement": 25,
+                },
+                {
+                    "timestamp": "2026-03-01T10:10:00+00:00",
+                    "followers": 1020,
+                    "notifications": 6,
+                    "engagement": 30,
+                },
             ],
             "is_protected": False,
             "last_spike_at": None,
@@ -325,7 +504,7 @@ class TestMain:
             patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
             patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
         ):
-            mock_get.return_value = {"followers": 1200, "notifications": 10}
+            mock_get.return_value = {"followers": 1200, "notifications": 10, "engagement": 100}
             mock_protect.side_effect = Exception("API error")
             await main([])
 
@@ -333,6 +512,49 @@ class TestMain:
         mock_notify.assert_awaited_once()
         state = json.loads(self.state_path.read_text())
         assert state["is_protected"] is False
+
+    async def test_main_engagement_spike_only(self, mock_client):
+        """Engagement-only spike triggers protection."""
+        initial_state = {
+            "history": [
+                {
+                    "timestamp": "2026-03-01T10:00:00+00:00",
+                    "followers": 1000,
+                    "notifications": 5,
+                    "engagement": 20,
+                },
+                {
+                    "timestamp": "2026-03-01T10:05:00+00:00",
+                    "followers": 1005,
+                    "notifications": 8,
+                    "engagement": 25,
+                },
+                {
+                    "timestamp": "2026-03-01T10:10:00+00:00",
+                    "followers": 1010,
+                    "notifications": 6,
+                    "engagement": 30,
+                },
+            ],
+            "is_protected": False,
+            "last_spike_at": None,
+        }
+        self.state_path.write_text(json.dumps(initial_state))
+
+        with (
+            patch("src.shield.Client", return_value=mock_client),
+            patch("src.shield.get_metrics", new_callable=AsyncMock) as mock_get,
+            patch("src.shield.set_protected", new_callable=AsyncMock) as mock_protect,
+            patch("src.shield.notify", new_callable=AsyncMock) as mock_notify,
+        ):
+            # Small follower change, big engagement jump
+            mock_get.return_value = {"followers": 1015, "notifications": 10, "engagement": 200}
+            await main([])
+
+        mock_protect.assert_awaited_once()
+        mock_notify.assert_awaited_once()
+        notify_msg = mock_notify.call_args.args[1]
+        assert "engagement" in notify_msg.lower()
 
 
 class TestParseArgs:
