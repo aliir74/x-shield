@@ -12,3 +12,4 @@ build/
 .context/
 cron.log
 .coverage
+*.plist
