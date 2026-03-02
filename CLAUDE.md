@@ -61,5 +61,5 @@ launchctl list | grep x-shield                                       # check sta
 - twikit `Client.post()` returns `tuple[dict | Any, Response]` — always unpack with `_, response`
 - `client._base_headers` provides authenticated headers (Bearer token + CSRF)
 - Protected mode toggle: POST to `https://api.x.com/1.1/account/settings.json` with `protected=true`
-- Spike detection: adaptive (3x rolling 24h avg) + static floor (100+ followers)
+- Spike detection: multi-signal (followers + engagement). Each signal: adaptive (3x rolling 24h avg) + static floor (followers: 100+, engagement: 50+)
 - Notifications via ntfy.sh HTTP POST

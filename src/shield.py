@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -19,6 +20,8 @@ from twikit import Client
 
 SPIKE_MULTIPLIER = 3.0
 STATIC_FLOOR = 100
+ENGAGEMENT_STATIC_FLOOR = 50
+RECENT_TWEETS_COUNT = 20
 CHECK_WINDOW_HOURS = 24
 STATE_FILE = Path(__file__).parent.parent / "state.json"
 
@@ -30,10 +33,30 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-class SpikeReason(Enum):
+class SpikeType(Enum):
     ADAPTIVE = "adaptive"
     STATIC_FLOOR = "static_floor"
     BOTH = "both"
+
+
+@dataclass
+class SpikeResult:
+    """Result of spike detection across multiple signals."""
+
+    followers: SpikeType | None = None
+    engagement: SpikeType | None = None
+
+    @property
+    def is_spike(self) -> bool:
+        return self.followers is not None or self.engagement is not None
+
+    def __str__(self) -> str:
+        parts = []
+        if self.followers:
+            parts.append(f"followers:{self.followers.value}")
+        if self.engagement:
+            parts.append(f"engagement:{self.engagement.value}")
+        return ", ".join(parts)
 
 
 def load_state(path: Path) -> dict:
@@ -60,36 +83,54 @@ def prune_history(history: list[dict], window_hours: int = CHECK_WINDOW_HOURS) -
     ]
 
 
-def detect_spike(current: dict, state: dict) -> SpikeReason | None:
-    """Detect follower spike using adaptive and static floor methods.
+def _check_signal(
+    current_value: int,
+    history: list[dict],
+    key: str,
+    static_floor: int,
+) -> SpikeType | None:
+    """Check a single metric for spikes using adaptive + static floor."""
+    deltas = [
+        history[i].get(key, 0) - history[i - 1].get(key, 0)
+        for i in range(1, len(history))
+    ]
+    avg_delta = mean(deltas) if deltas else 0
+    current_delta = current_value - history[-1].get(key, 0)
 
-    Returns the reason for the spike, or None if no spike detected.
+    adaptive = current_delta > avg_delta * SPIKE_MULTIPLIER and avg_delta > 0
+    static = current_delta >= static_floor
+
+    if adaptive and static:
+        return SpikeType.BOTH
+    if adaptive:
+        return SpikeType.ADAPTIVE
+    if static:
+        return SpikeType.STATIC_FLOOR
+    return None
+
+
+def detect_spike(current: dict, state: dict) -> SpikeResult | None:
+    """Detect spikes in followers and engagement.
+
+    Returns a SpikeResult if any spike is detected, or None.
     """
     history = state.get("history", [])
     if len(history) < 2:
         return None
 
-    deltas = [
-        history[i]["followers"] - history[i - 1]["followers"]
-        for i in range(1, len(history))
-    ]
-    avg_delta = mean(deltas) if deltas else 0
-    current_delta = current["followers"] - history[-1]["followers"]
+    followers_spike = _check_signal(
+        current["followers"], history, "followers", STATIC_FLOOR
+    )
+    engagement_spike = _check_signal(
+        current.get("engagement", 0), history, "engagement", ENGAGEMENT_STATIC_FLOOR
+    )
 
-    adaptive = current_delta > avg_delta * SPIKE_MULTIPLIER and avg_delta > 0
-    static = current_delta >= STATIC_FLOOR
-
-    if adaptive and static:
-        return SpikeReason.BOTH
-    if adaptive:
-        return SpikeReason.ADAPTIVE
-    if static:
-        return SpikeReason.STATIC_FLOOR
-    return None
+    result = SpikeResult(followers=followers_spike, engagement=engagement_spike)
+    return result if result.is_spike else None
 
 
 async def get_metrics(client: Client, screen_name: str) -> dict:
-    """Fetch current follower count and notification count."""
+    """Fetch current follower count, notification count, and tweet engagement."""
     user = await client.get_user_by_screen_name(screen_name)
     followers = user.followers_count
 
@@ -100,7 +141,17 @@ async def get_metrics(client: Client, screen_name: str) -> dict:
         log.warning("failed to fetch notifications, defaulting to 0")
         notification_count = 0
 
-    return {"followers": followers, "notifications": notification_count}
+    try:
+        tweets = await client.get_user_tweets(user.id, "Tweets", count=RECENT_TWEETS_COUNT)
+        engagement = sum(
+            (tweet.reply_count or 0) + (tweet.quote_count or 0)
+            for tweet in tweets
+        )
+    except Exception:
+        log.warning("failed to fetch tweet engagement, defaulting to 0")
+        engagement = 0
+
+    return {"followers": followers, "notifications": notification_count, "engagement": engagement}
 
 
 async def set_protected(client: Client) -> None:
@@ -176,15 +227,16 @@ async def main(argv: list[str] | None = None) -> None:
         return
 
     log.info(
-        "current metrics — followers: %d, notifications: %d",
+        "current metrics — followers: %d, notifications: %d, engagement: %d",
         current["followers"],
         current["notifications"],
+        current["engagement"],
     )
 
-    spike_reason = detect_spike(current, state)
+    spike_result = detect_spike(current, state)
 
-    if spike_reason and not state.get("is_protected", False):
-        log.warning("spike detected: %s", spike_reason.value)
+    if spike_result and not state.get("is_protected", False):
+        log.warning("spike detected: %s", spike_result)
 
         try:
             await set_protected(client)
@@ -195,15 +247,25 @@ async def main(argv: list[str] | None = None) -> None:
             log.error("failed to set protected: %s", exc)
 
         if ntfy_topic:
-            delta = current["followers"] - state["history"][-1]["followers"] if state["history"] else 0
+            follower_delta = (
+                current["followers"] - state["history"][-1]["followers"]
+                if state["history"]
+                else 0
+            )
+            engagement_delta = (
+                current["engagement"] - state["history"][-1].get("engagement", 0)
+                if state["history"]
+                else 0
+            )
             await notify(
                 ntfy_topic,
-                f"Spike: {spike_reason.value}\n"
-                f"Follower delta: +{delta}\n"
+                f"Spike: {spike_result}\n"
+                f"Follower delta: +{follower_delta}\n"
+                f"Engagement delta: +{engagement_delta}\n"
                 f"Total followers: {current['followers']}\n"
                 f"Account is now PRIVATE.",
             )
-    elif spike_reason:
+    elif spike_result:
         log.info("spike detected but account already protected")
     else:
         log.info("no spike detected")
@@ -212,6 +274,7 @@ async def main(argv: list[str] | None = None) -> None:
         "timestamp": datetime.now(UTC).isoformat(),
         "followers": current["followers"],
         "notifications": current["notifications"],
+        "engagement": current["engagement"],
     })
     state["history"] = prune_history(state["history"])
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from src.shield import SpikeReason  # noqa: F401
+from src.shield import SpikeResult, SpikeType  # noqa: F401
 
 
 @pytest.fixture()
@@ -18,14 +18,42 @@ def state_with_history():
     """Return a state with enough history for spike detection."""
     return {
         "history": [
-            {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
-            {"timestamp": "2026-03-01T10:05:00+00:00", "followers": 1010, "notifications": 8},
-            {"timestamp": "2026-03-01T10:10:00+00:00", "followers": 1020, "notifications": 6},
-            {"timestamp": "2026-03-01T10:15:00+00:00", "followers": 1030, "notifications": 7},
+            {
+                "timestamp": "2026-03-01T10:00:00+00:00",
+                "followers": 1000,
+                "notifications": 5,
+                "engagement": 20,
+            },
+            {
+                "timestamp": "2026-03-01T10:05:00+00:00",
+                "followers": 1010,
+                "notifications": 8,
+                "engagement": 25,
+            },
+            {
+                "timestamp": "2026-03-01T10:10:00+00:00",
+                "followers": 1020,
+                "notifications": 6,
+                "engagement": 30,
+            },
+            {
+                "timestamp": "2026-03-01T10:15:00+00:00",
+                "followers": 1030,
+                "notifications": 7,
+                "engagement": 35,
+            },
         ],
         "is_protected": False,
         "last_spike_at": None,
     }
+
+
+def _make_mock_tweet(reply_count: int = 5, quote_count: int = 3) -> MagicMock:
+    """Create a mock Tweet with engagement counts."""
+    tweet = MagicMock()
+    tweet.reply_count = reply_count
+    tweet.quote_count = quote_count
+    return tweet
 
 
 @pytest.fixture()
@@ -34,8 +62,12 @@ def mock_client():
     client = MagicMock()
     user = MagicMock()
     user.followers_count = 1500
+    user.id = "12345"
     client.get_user_by_screen_name = AsyncMock(return_value=user)
     client.get_notifications = AsyncMock(return_value=[MagicMock(), MagicMock(), MagicMock()])
+    client.get_user_tweets = AsyncMock(
+        return_value=[_make_mock_tweet(), _make_mock_tweet(), _make_mock_tweet()]
+    )
     client.post = AsyncMock(return_value=(None, MagicMock(status_code=200)))
     type(client)._base_headers = PropertyMock(return_value={"Authorization": "Bearer test"})
     return client
