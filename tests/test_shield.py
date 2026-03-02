@@ -161,15 +161,15 @@ class TestPruneHistory:
 class TestGetMetrics:
     async def test_get_metrics_success(self, mock_client):
         """Returns follower count and notification count."""
-        result = await get_metrics(mock_client)
+        result = await get_metrics(mock_client, "testuser")
         assert result == {"followers": 1500, "notifications": 3}
-        mock_client.user.assert_awaited_once()
+        mock_client.get_user_by_screen_name.assert_awaited_once_with("testuser")
         mock_client.get_notifications.assert_awaited_once_with("All", count=40)
 
     async def test_get_metrics_notification_failure(self, mock_client):
         """Falls back to 0 notifications when fetch fails."""
         mock_client.get_notifications = AsyncMock(side_effect=Exception("API error"))
-        result = await get_metrics(mock_client)
+        result = await get_metrics(mock_client, "testuser")
         assert result == {"followers": 1500, "notifications": 0}
 
 

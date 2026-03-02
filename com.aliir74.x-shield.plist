@@ -10,6 +10,7 @@
         <string>/Users/aliirani/.local/bin/uv</string>
         <string>run</string>
         <string>python</string>
+        <string>-u</string>
         <string>-m</string>
         <string>src.shield</string>
     </array>

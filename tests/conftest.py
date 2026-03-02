@@ -34,7 +34,7 @@ def mock_client():
     client = MagicMock()
     user = MagicMock()
     user.followers_count = 1500
-    client.user = AsyncMock(return_value=user)
+    client.get_user_by_screen_name = AsyncMock(return_value=user)
     client.get_notifications = AsyncMock(return_value=[MagicMock(), MagicMock(), MagicMock()])
     client.post = AsyncMock(return_value=(None, MagicMock(status_code=200)))
     type(client)._base_headers = PropertyMock(return_value={"Authorization": "Bearer test"})
@@ -46,6 +46,7 @@ def env_vars(monkeypatch):
     """Set required environment variables for main() and prevent .env override."""
     monkeypatch.setenv("CT0", "test_ct0")
     monkeypatch.setenv("AUTH_TOKEN", "test_auth_token")
+    monkeypatch.setenv("SCREEN_NAME", "testuser")
     monkeypatch.setenv("NTFY_TOPIC", "test_topic")
     with patch("src.shield.load_dotenv"):
         yield
