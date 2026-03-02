@@ -11,3 +11,5 @@ build/
 .ruff_cache/
 .context/
 cron.log
+.coverage
+*.plist

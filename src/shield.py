@@ -88,9 +88,9 @@ def detect_spike(current: dict, state: dict) -> SpikeReason | None:
     return None
 
 
-async def get_metrics(client: Client) -> dict:
+async def get_metrics(client: Client, screen_name: str) -> dict:
     """Fetch current follower count and notification count."""
-    user = await client.user()
+    user = await client.get_user_by_screen_name(screen_name)
     followers = user.followers_count
 
     try:
@@ -144,9 +144,10 @@ async def main(argv: list[str] | None = None) -> None:
     ct0 = os.environ.get("CT0")
     auth_token = os.environ.get("AUTH_TOKEN")
     ntfy_topic = os.environ.get("NTFY_TOPIC")
+    screen_name = os.environ.get("SCREEN_NAME")
 
-    if not ct0 or not auth_token:
-        log.error("CT0 and AUTH_TOKEN must be set in .env")
+    if not ct0 or not auth_token or not screen_name:
+        log.error("CT0, AUTH_TOKEN, and SCREEN_NAME must be set in .env")
         sys.exit(1)
 
     client = Client()
@@ -166,7 +167,7 @@ async def main(argv: list[str] | None = None) -> None:
     state = load_state(STATE_FILE)
 
     try:
-        current = await get_metrics(client)
+        current = await get_metrics(client, screen_name)
     except Exception as exc:
         msg = f"failed to fetch metrics: {exc}"
         log.error(msg)

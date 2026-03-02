@@ -39,6 +39,7 @@ Edit `.env` with your values:
 ```
 CT0=your_ct0_cookie_value
 AUTH_TOKEN=your_auth_token_cookie_value
+SCREEN_NAME=your_twitter_username
 NTFY_TOPIC=your_unique_topic_name
 ```
 
