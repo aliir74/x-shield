@@ -69,16 +69,28 @@ class TestCheckSignal:
         result = _check_signal(1035, history, "followers", 100)
         assert result is None
 
-    def test_missing_key_defaults_to_zero(self):
-        """History entries missing the key default to 0."""
+    def test_missing_key_returns_none(self):
+        """History entries missing the key entirely returns None."""
         history = [
             {"followers": 1000},
             {"followers": 1010},
         ]
-        # engagement missing from history, defaults to 0. current=60, delta=60, avg=0.
-        # avg_delta=0 → adaptive skipped. 60 >= 50 → static floor.
+        # engagement missing from all history entries — can't compute meaningful delta
         result = _check_signal(60, history, "engagement", 50)
-        assert result == SpikeType.STATIC_FLOOR
+        assert result is None
+
+    def test_mixed_history_entries(self):
+        """Only entries where both consecutive have the key contribute to deltas."""
+        history = [
+            {"followers": 1000},  # no engagement
+            {"followers": 1010, "engagement": 20},  # pair with prev: skip (prev missing)
+            {"followers": 1020, "engagement": 25},  # pair with prev: delta = 5
+            {"followers": 1030, "engagement": 30},  # pair with prev: delta = 5
+        ]
+        # avg_delta = 5, current=50, last has engagement=30, current_delta=20
+        # 20 > 5*3=15 → adaptive. 20 < 50 → no static. → ADAPTIVE
+        result = _check_signal(50, history, "engagement", 50)
+        assert result == SpikeType.ADAPTIVE
 
 
 class TestDetectSpike:
@@ -173,7 +185,7 @@ class TestDetectSpike:
         assert result is None
 
     def test_backward_compat_missing_engagement(self):
-        """Old history entries without engagement key still work."""
+        """Old history entries without engagement key: engagement spike is None."""
         state = {
             "history": [
                 {"timestamp": "2026-03-01T10:00:00+00:00", "followers": 1000, "notifications": 5},
@@ -185,6 +197,7 @@ class TestDetectSpike:
         result = detect_spike(current, state)
         assert result is not None
         assert result.followers == SpikeType.ADAPTIVE
+        assert result.engagement is None
 
 
 class TestSpikeResult:
@@ -312,7 +325,7 @@ class TestSetProtected:
         """Calls Twitter v1.1 API with correct URL and data."""
         await set_protected(mock_client)
         mock_client.post.assert_awaited_once_with(
-            "https://api.x.com/1.1/account/settings.json",
+            "https://x.com/i/api/1.1/account/settings.json",
             data={"protected": "true"},
             headers={
                 "Authorization": "Bearer test",
@@ -405,6 +418,8 @@ class TestMain:
 
         mock_protect.assert_awaited_once()
         mock_notify.assert_awaited_once()
+        notify_msg = mock_notify.call_args.args[1]
+        assert "Account is now PRIVATE." in notify_msg
         state = json.loads(self.state_path.read_text())
         assert state["is_protected"] is True
         assert state["last_spike_at"] is not None
@@ -508,8 +523,10 @@ class TestMain:
             mock_protect.side_effect = Exception("API error")
             await main([])
 
-        # Notification still sent despite protect failure
+        # Notification still sent despite protect failure, but message reflects failure
         mock_notify.assert_awaited_once()
+        notify_msg = mock_notify.call_args.args[1]
+        assert "FAILED to set account to private!" in notify_msg
         state = json.loads(self.state_path.read_text())
         assert state["is_protected"] is False
 

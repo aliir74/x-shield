@@ -91,11 +91,16 @@ def _check_signal(
 ) -> SpikeType | None:
     """Check a single metric for spikes using adaptive + static floor."""
     deltas = [
-        history[i].get(key, 0) - history[i - 1].get(key, 0)
+        history[i][key] - history[i - 1][key]
         for i in range(1, len(history))
+        if key in history[i] and key in history[i - 1]
     ]
     avg_delta = mean(deltas) if deltas else 0
-    current_delta = current_value - history[-1].get(key, 0)
+
+    if key not in history[-1]:
+        return None
+
+    current_delta = current_value - history[-1][key]
 
     adaptive = current_delta > avg_delta * SPIKE_MULTIPLIER and avg_delta > 0
     static = current_delta >= static_floor
@@ -159,7 +164,7 @@ async def set_protected(client: Client) -> None:
     headers = client._base_headers  # noqa: SLF001
     headers["content-type"] = "application/x-www-form-urlencoded"
     _, response = await client.post(
-        "https://api.x.com/1.1/account/settings.json",
+        "https://x.com/i/api/1.1/account/settings.json",
         data={"protected": "true"},
         headers=headers,
     )
@@ -238,11 +243,13 @@ async def main(argv: list[str] | None = None) -> None:
     if spike_result and not state.get("is_protected", False):
         log.warning("spike detected: %s", spike_result)
 
+        protected_ok = False
         try:
             await set_protected(client)
             state["is_protected"] = True
             state["last_spike_at"] = datetime.now(UTC).isoformat()
             log.info("account set to protected mode")
+            protected_ok = True
         except Exception as exc:
             log.error("failed to set protected: %s", exc)
 
@@ -257,13 +264,18 @@ async def main(argv: list[str] | None = None) -> None:
                 if state["history"]
                 else 0
             )
+            status_line = (
+                "Account is now PRIVATE."
+                if protected_ok
+                else "FAILED to set account to private!"
+            )
             await notify(
                 ntfy_topic,
                 f"Spike: {spike_result}\n"
                 f"Follower delta: +{follower_delta}\n"
                 f"Engagement delta: +{engagement_delta}\n"
                 f"Total followers: {current['followers']}\n"
-                f"Account is now PRIVATE.",
+                f"{status_line}",
             )
     elif spike_result:
         log.info("spike detected but account already protected")
