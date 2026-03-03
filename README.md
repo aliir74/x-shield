@@ -1,5 +1,8 @@
 # X Shield
 
+[![GitHub Sponsors](https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=#EA4AAA)](https://github.com/sponsors/aliir74)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/aliir74)
+
 Auto-private your Twitter/X account when viral activity is detected. Monitors follower spikes and mention surges, then automatically switches the account to protected mode.
 
 ## How it works
@@ -123,3 +126,11 @@ Constants in `src/shield.py`:
 | `SPIKE_MULTIPLIER` | 3.0 | Adaptive threshold multiplier |
 | `STATIC_FLOOR` | 100 | Minimum follower delta to trigger |
 | `CHECK_WINDOW_HOURS` | 24 | Rolling window for baseline calculation |
+
+## Support This Project
+
+If you find this project useful, consider supporting its development:
+
+- Star this repo
+- Report bugs and submit PRs
+- [Sponsor on GitHub](https://github.com/sponsors/aliir74) or [Buy me a coffee](https://www.buymeacoffee.com/aliir74)
