@@ -106,8 +106,8 @@ class TestDetectSpike:
 
     def test_engagement_spike_only(self, state_with_history):
         """Engagement spike triggers with no follower spike."""
-        # avg engagement delta = 5, current_delta = 65 → 13x → adaptive + 65 >= 50 → static
-        current = {"followers": 1035, "notifications": 10, "engagement": 100}
+        # avg engagement delta = 5, current_delta = 265 → 53x → adaptive + 265 >= 200 → static
+        current = {"followers": 1035, "notifications": 10, "engagement": 300}
         result = detect_spike(current, state_with_history)
         assert result is not None
         assert result.followers is None
@@ -115,7 +115,7 @@ class TestDetectSpike:
 
     def test_both_signals_spike(self, state_with_history):
         """Both follower and engagement spike together."""
-        current = {"followers": 1180, "notifications": 10, "engagement": 100}
+        current = {"followers": 1180, "notifications": 10, "engagement": 300}
         result = detect_spike(current, state_with_history)
         assert result is not None
         assert result.followers == SpikeType.BOTH
@@ -297,8 +297,8 @@ class TestGetMetrics:
     async def test_get_metrics_success(self, mock_client):
         """Returns follower count, notification count, and engagement."""
         result = await get_metrics(mock_client, "testuser")
-        # 3 mock tweets, each with reply_count=5 + quote_count=3 = 8, total = 24
-        assert result == {"followers": 1500, "notifications": 3, "engagement": 24}
+        # 3 mock tweets, each: retweet*3 + quote*2 + favorite + reply = 2*3+3*2+10+5 = 27, total = 81
+        assert result == {"followers": 1500, "notifications": 3, "engagement": 81}
         mock_client.get_user_by_screen_name.assert_awaited_once_with("testuser")
         mock_client.get_notifications.assert_awaited_once_with("All", count=40)
         mock_client.get_user_tweets.assert_awaited_once_with("12345", "Tweets", count=20)
@@ -309,7 +309,7 @@ class TestGetMetrics:
         result = await get_metrics(mock_client, "testuser")
         assert result["followers"] == 1500
         assert result["notifications"] == 0
-        assert result["engagement"] == 24
+        assert result["engagement"] == 81
 
     async def test_get_metrics_tweet_fetch_failure(self, mock_client):
         """Falls back to 0 engagement when tweet fetch fails."""

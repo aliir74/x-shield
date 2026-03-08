@@ -48,11 +48,18 @@ def state_with_history():
     }
 
 
-def _make_mock_tweet(reply_count: int = 5, quote_count: int = 3) -> MagicMock:
+def _make_mock_tweet(
+    reply_count: int = 5,
+    quote_count: int = 3,
+    favorite_count: int = 10,
+    retweet_count: int = 2,
+) -> MagicMock:
     """Create a mock Tweet with engagement counts."""
     tweet = MagicMock()
     tweet.reply_count = reply_count
     tweet.quote_count = quote_count
+    tweet.favorite_count = favorite_count
+    tweet.retweet_count = retweet_count
     return tweet
 
 

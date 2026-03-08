@@ -20,7 +20,7 @@ from twikit import Client
 
 SPIKE_MULTIPLIER = 3.0
 STATIC_FLOOR = 100
-ENGAGEMENT_STATIC_FLOOR = 50
+ENGAGEMENT_STATIC_FLOOR = 200
 RECENT_TWEETS_COUNT = 20
 CHECK_WINDOW_HOURS = 24
 STATE_FILE = Path(__file__).parent.parent / "state.json"
@@ -149,7 +149,10 @@ async def get_metrics(client: Client, screen_name: str) -> dict:
     try:
         tweets = await client.get_user_tweets(user.id, "Tweets", count=RECENT_TWEETS_COUNT)
         engagement = sum(
-            (tweet.reply_count or 0) + (tweet.quote_count or 0)
+            (tweet.retweet_count or 0) * 3
+            + (tweet.quote_count or 0) * 2
+            + (tweet.favorite_count or 0)
+            + (tweet.reply_count or 0)
             for tweet in tweets
         )
     except Exception:
